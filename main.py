@@ -1,10 +1,8 @@
 import os
-import time
 import asyncio
 import base64
 import logging
 import urllib
-import schedule
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from elasticsearch import Elasticsearch
@@ -12,20 +10,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_elasticsearch import ElasticsearchStore
 from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader
+from fastapi import FastAPI
 
 # 🔹 Configuração de Logs
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # 🔹 Carrega variáveis de ambiente
 load_dotenv()
 
+# 🔹 Inicializa FastAPI
+app = FastAPI()
+
+# 🔹 Conexão com MongoDB
 client = None
 db = None
-
 
 async def connect_to_mongo():
     """Estabelece conexão com o MongoDB."""
@@ -37,11 +35,8 @@ async def connect_to_mongo():
         creds, host = rest.split("@", 1)
         user, password = creds.split(":", 1)
 
-        # Escapando usuário e senha corretamente
         user_escaped = urllib.parse.quote_plus(user)
         password_escaped = urllib.parse.quote_plus(password)
-
-        # Montando a URI escapada
         escaped_uri = f"{scheme}://{user_escaped}:{password_escaped}@{host}"
     else:
         escaped_uri = raw_uri
@@ -50,14 +45,12 @@ async def connect_to_mongo():
     db = client['hits']
     logging.info("✅ Conectado ao MongoDB")
 
-
 async def close_mongo_connection():
     """Fecha a conexão com o MongoDB."""
     global client
     if client:
         client.close()
         logging.info("🔌 Desconectado do MongoDB")
-
 
 # 🔹 Configuração do Elasticsearch
 es = Elasticsearch(
@@ -78,19 +71,12 @@ embedding_model = AzureOpenAIEmbeddings(
     chunk_size=1
 )
 
-# 🔹 Splitter para dividir textos corretamente
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1800, chunk_overlap=50, separators=["\n\n", "\n", " "]
-)
-
+# 🔹 Splitter de Texto
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1800, chunk_overlap=50, separators=["\n\n", "\n", " "])
 
 def clean_text(text):
     """Remove caracteres indesejados e normaliza espaços e quebras de linha."""
-    text = text.replace("\n", " ")  # Substitui quebras de linha por espaço
-    text = text.replace("\u0005", "").replace("\u0002", "").replace("\u001d", "")  # Remove caracteres invisíveis
-    text = ' '.join(text.split())  # Remove múltiplos espaços
-    return text
-
+    return ' '.join(text.replace("\n", " ").split())
 
 async def process_document():
     """Processa um documento do MongoDB e armazena embeddings no Elasticsearch."""
@@ -101,11 +87,7 @@ async def process_document():
         await connect_to_mongo()
 
     try:
-        # 🔹 Obtém um único documento com status = 0
-        document = await db['document'].find_one_and_update(
-            {"status": 0}, {"$set": {"status": 1}}
-        )
-
+        document = await db['document'].find_one_and_update({"status": 0}, {"$set": {"status": 1}})
         if not document:
             logging.info("🔍 Nenhum documento pendente para processamento.")
             return
@@ -116,7 +98,6 @@ async def process_document():
 
         logging.info(f"📄 Processando documento: {filename}")
 
-        # 🔹 Obtém o nome da empresa a partir do enterprise_id
         enterprise = await db['enterprise'].find_one({"_id": enterprise_id})
         if not enterprise:
             logging.warning(f"⚠️ Empresa com ID {enterprise_id} não encontrada.")
@@ -125,9 +106,6 @@ async def process_document():
         enterprise_name = enterprise.get("name")
         index_name = enterprise_name.replace(" ", "").lower()
 
-        logging.info(f"🏢 Empresa: {enterprise_name} | Índice no Elasticsearch: {index_name}")
-
-        # 🔹 Decodifica o conteúdo base64 e salva o arquivo temporariamente
         temp_folder = "/tmp"
         os.makedirs(temp_folder, exist_ok=True)
         file_path = os.path.join(temp_folder, filename)
@@ -135,9 +113,8 @@ async def process_document():
         with open(file_path, "wb") as file:
             file.write(base64.b64decode(base64_content))
 
-        # 🔹 Verifica o tipo de arquivo e carrega corretamente
         if filename.endswith(".pdf"):
-            loader = PyMuPDFLoader(file_path)  # Usa PyMuPDFLoader para melhor extração
+            loader = PyMuPDFLoader(file_path)
         elif filename.endswith(".docx"):
             loader = Docx2txtLoader(file_path)
         else:
@@ -145,48 +122,49 @@ async def process_document():
             return
 
         docs = loader.load()
-
-        # 🔹 Limpa e formata os textos extraídos
         for doc in docs:
             doc.page_content = clean_text(doc.page_content)
 
-        # 🔹 Divide o texto em chunks
         docs_split = text_splitter.split_documents(docs)
 
-        # # 🔹 Armazena os embeddings no Elasticsearch
-        # if es.indices.exists(index=index_name):
-        #     es.indices.delete(index=index_name)
-
         es_store = ElasticsearchStore.from_documents(
-            docs, embedding_model, es_cloud_id=os.getenv('ES_CLOUD_ID'), es_user=os.getenv('ES_USER'),
-            es_password=os.getenv('ES_PASSWORD'), index_name=index_name
+            docs, embedding_model, es_cloud_id=os.getenv('ES_CLOUD_ID'),
+            es_user=os.getenv('ES_USER'), es_password=os.getenv('ES_PASSWORD'),
+            index_name=index_name
         )
         es_store.client.indices.refresh(index=index_name)
 
         logging.info(f"✅ Documento '{filename}' processado e armazenado no Elasticsearch.")
-
-        # 🔹 Remove o arquivo temporário
         os.remove(file_path)
 
     except Exception as e:
         logging.error(f"❌ Erro ao processar documento: {e}")
 
-
-async def main():
-    """Loop assíncrono para buscar documentos continuamente."""
+async def process_loop():
+    """Loop assíncrono para processar documentos continuamente."""
     await connect_to_mongo()
-
     while True:
         await process_document()
-        await asyncio.sleep(60)  # Espera 60 segundos antes de buscar novamente
+        await asyncio.sleep(60)
 
+# 🔹 Rota para verificar se a API está rodando
+@app.get("/")
+def read_root():
+    return {"status": "API rodando 🚀"}
 
-if __name__ == "__main__":
-    logging.info("🚀 Iniciando o processamento contínuo...")
+# 🔹 Rota para processar um documento manualmente
+@app.post("/process")
+async def trigger_processing():
+    """Rota para processar documentos manualmente via API."""
+    await process_document()
+    return {"message": "Processamento iniciado"}
 
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("🛑 Interrompido pelo usuário.")
-    finally:
-        asyncio.run(close_mongo_connection())
+# 🔹 Inicia o loop assíncrono de processamento ao iniciar o app
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(process_loop())
+
+# 🔹 Fecha conexão ao encerrar o app
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection()
