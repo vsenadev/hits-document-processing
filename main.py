@@ -1,8 +1,10 @@
 import os
+import time
 import asyncio
 import base64
 import logging
 import urllib
+import schedule
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from elasticsearch import Elasticsearch
@@ -13,17 +15,18 @@ from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader
 from fastapi import FastAPI
 
 # 🔹 Configuração de Logs
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 # 🔹 Carrega variáveis de ambiente
 load_dotenv()
 
-# 🔹 Inicializa FastAPI
-app = FastAPI()
-
-# 🔹 Conexão com MongoDB
 client = None
 db = None
+app = FastAPI()
 
 async def connect_to_mongo():
     """Estabelece conexão com o MongoDB."""
@@ -37,6 +40,7 @@ async def connect_to_mongo():
 
         user_escaped = urllib.parse.quote_plus(user)
         password_escaped = urllib.parse.quote_plus(password)
+
         escaped_uri = f"{scheme}://{user_escaped}:{password_escaped}@{host}"
     else:
         escaped_uri = raw_uri
@@ -45,12 +49,14 @@ async def connect_to_mongo():
     db = client['hits']
     logging.info("✅ Conectado ao MongoDB")
 
+
 async def close_mongo_connection():
     """Fecha a conexão com o MongoDB."""
     global client
     if client:
         client.close()
         logging.info("🔌 Desconectado do MongoDB")
+
 
 # 🔹 Configuração do Elasticsearch
 es = Elasticsearch(
@@ -71,12 +77,13 @@ embedding_model = AzureOpenAIEmbeddings(
     chunk_size=1
 )
 
-# 🔹 Splitter de Texto
+# 🔹 Splitter de texto
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1800, chunk_overlap=50, separators=["\n\n", "\n", " "])
 
 def clean_text(text):
     """Remove caracteres indesejados e normaliza espaços e quebras de linha."""
     return ' '.join(text.replace("\n", " ").split())
+
 
 async def process_document():
     """Processa um documento do MongoDB e armazena embeddings no Elasticsearch."""
@@ -140,6 +147,7 @@ async def process_document():
     except Exception as e:
         logging.error(f"❌ Erro ao processar documento: {e}")
 
+
 async def process_loop():
     """Loop assíncrono para processar documentos continuamente."""
     await connect_to_mongo()
@@ -147,24 +155,19 @@ async def process_loop():
         await process_document()
         await asyncio.sleep(60)
 
-# 🔹 Rota para verificar se a API está rodando
 @app.get("/")
-def read_root():
+async def read_root():
     return {"status": "API rodando 🚀"}
 
-# 🔹 Rota para processar um documento manualmente
 @app.post("/process")
 async def trigger_processing():
-    """Rota para processar documentos manualmente via API."""
     await process_document()
     return {"message": "Processamento iniciado"}
 
-# 🔹 Inicia o loop assíncrono de processamento ao iniciar o app
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(process_loop())
 
-# 🔹 Fecha conexão ao encerrar o app
 @app.on_event("shutdown")
 async def shutdown_event():
     await close_mongo_connection()
